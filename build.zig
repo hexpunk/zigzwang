@@ -4,20 +4,32 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const sqlite_h = b.addTranslateC(.{
+        .root_source_file = b.path("src/vendor/sqlite3.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    sqlite_h.addIncludePath(b.path("src/vendor"));
+    const sqlite_mod = sqlite_h.createModule();
+    sqlite_mod.addCSourceFile(.{
+        .file = b.path("src/vendor/sqlite3.c"),
+        .flags = &.{},
+    });
+
     const exe = b.addExecutable(.{
-        .name = "biddy",
+        .name = "zigzwang",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
+            .imports = &.{
+                .{
+                    .name = "sqlite",
+                    .module = sqlite_mod,
+                },
+            },
         }),
-    });
-
-    exe.root_module.addIncludePath(b.path("src/vendor"));
-    exe.root_module.addCSourceFile(.{
-        .file = b.path("src/vendor/sqlite3.c"),
-        .flags = &.{},
     });
 
     b.installArtifact(exe);
@@ -38,14 +50,13 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
+            .imports = &.{
+                .{
+                    .name = "sqlite",
+                    .module = sqlite_mod,
+                },
+            },
         }),
-    });
-
-    exe_tests.root_module.addIncludePath(b.path("src/vendor"));
-    exe_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/vendor/sqlite3.c"),
-        .flags = &.{},
     });
 
     const run_exe_tests = b.addRunArtifact(exe_tests);

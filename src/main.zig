@@ -1,12 +1,12 @@
 const std = @import("std");
 const StringHashMap = std.StringHashMap;
 
-// const sqlite = @import("sqlite.zig");
+const sqlite = @import("sqlite.zig");
 const cgi = @import("cgi.zig");
 
 pub fn main(init: std.process.Init) !void {
-    // var db = try sqlite.SqliteDatabase.init("test.db");
-    // defer db.close();
+    var db = try sqlite.SqliteDatabase.init("test.db");
+    defer db.close();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
