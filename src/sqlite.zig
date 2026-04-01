@@ -76,7 +76,7 @@ pub const SqliteDatabase = struct {
     pub fn init(path: []const u8) !SqliteDatabase {
         var h: ?*sqlite.sqlite3 = undefined;
         try checkError(sqlite.sqlite3_open(path.ptr, &h));
-        const handle = h orelse return SqliteError.Generic;
+        const handle = h orelse @panic("sqlite3_open succeeded but handle is null");
         try checkError(sqlite.sqlite3_exec(handle, "PRAGMA journal_mode = WAL;", null, null, null));
         try checkError(sqlite.sqlite3_exec(handle, "PRAGMA synchronous = NORMAL;", null, null, null));
         try checkError(sqlite.sqlite3_exec(handle, "PRAGMA busy_timeout = 5000;", null, null, null));
@@ -97,6 +97,8 @@ pub const SqliteDatabase = struct {
         if (self.handle) |h| {
             _ = sqlite.sqlite3_close(h);
             self.handle = null;
+        } else {
+            @panic("attempted to close a database that was not open");
         }
     }
 };
