@@ -13,3 +13,7 @@ docgen_tmp/
 # End of https://www.toptal.com/developers/gitignore/api/zig
 
 .zig-cache/
+logs/*
+!logs/.keep
+data/*
+!data/.keep

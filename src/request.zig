@@ -10,7 +10,8 @@ pub const Errors = error{
 };
 
 pub const Request = struct {
-    allocator: std.mem.Allocator,
+    _allocator: std.mem.Allocator,
+
     method: []const u8,
     path: []const u8,
     query_string: []const u8,
@@ -56,7 +57,7 @@ pub const Request = struct {
         errdefer allocator.free(query_string);
 
         return .{
-            .allocator = allocator,
+            ._allocator = allocator,
             .method = method,
             .path = path,
             .query_string = query_string,
@@ -66,29 +67,10 @@ pub const Request = struct {
     }
 
     pub fn deinit(self: *Request) void {
-        self.allocator.free(self.body);
+        self._allocator.free(self.body);
         self.headers.deinit();
-        self.allocator.free(self.method);
-        self.allocator.free(self.path);
-        self.allocator.free(self.query_string);
+        self._allocator.free(self.method);
+        self._allocator.free(self.path);
+        self._allocator.free(self.query_string);
     }
 };
-
-pub fn sendResponse(io: Io, allocator: Allocator, status_code: u16, headers: StringHashMap([]const u8), body: []const u8) !void {
-    const buffer = try allocator.alloc(u8, 1024);
-    defer allocator.free(buffer);
-
-    var stdout = Io.File.Writer.init(Io.File.stdout(), io, buffer);
-    const writer = &stdout.interface;
-
-    try writer.print("Status: {d}\r\n", .{status_code});
-
-    var it = headers.iterator();
-    while (it.next()) |entry| {
-        try writer.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-    }
-
-    try writer.print("Content-Length: {d}\r\n\r\n", .{body.len});
-    try writer.writeAll(body);
-    try writer.flush();
-}
