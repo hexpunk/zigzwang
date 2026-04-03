@@ -7,11 +7,12 @@ fn Terminal(comptime T: type) type {
     return struct {
         const Self = @This();
 
+        allocator: Allocator,
         handler: T,
         parameter_names: ArrayList([]const u8) = .empty,
 
-        pub fn deinit(self: *Self, allocator: Allocator) void {
-            self.parameter_names.deinit(allocator);
+        pub fn deinit(self: *Self) void {
+            self.parameter_names.deinit(self.allocator);
         }
     };
 }
@@ -19,9 +20,10 @@ fn Terminal(comptime T: type) type {
 test "Terminal creation and deinitialization" {
     const TerminalType = Terminal(i32);
     var terminal = TerminalType{
+        .allocator = std.testing.allocator,
         .handler = 42,
     };
-    defer terminal.deinit(std.testing.allocator);
+    defer terminal.deinit();
 
     try terminal.parameter_names.append(std.testing.allocator, "id");
     try terminal.parameter_names.append(std.testing.allocator, "name");
@@ -34,23 +36,36 @@ test "Terminal creation and deinitialization" {
 
 /// Static segments match a specific path segment and can have child segments and/or be terminal.
 const Static = struct {
+    allocator: Allocator,
+
     name: []const u8,
     children: ArrayList(usize) = .empty,
     terminal: ?usize = null,
 
-    pub fn deinit(self: *Static, allocator: Allocator) void {
-        self.children.deinit(allocator);
+    pub fn init(allocator: Allocator, name: []const u8) Static {
+        return Static{
+            .allocator = allocator,
+            .name = name,
+            .children = .empty,
+            .terminal = null,
+        };
+    }
+
+    pub fn addChild(self: *Static, childIndex: usize) !void {
+        try self.children.append(self.allocator, childIndex);
+    }
+
+    pub fn deinit(self: *Static) void {
+        self.children.deinit(self.allocator);
     }
 };
 
 test "Static segment creation and deinitialization" {
-    var staticSegment = Static{
-        .name = "users",
-    };
-    defer staticSegment.deinit(std.testing.allocator);
+    var staticSegment = Static.init(std.testing.allocator, "users");
+    defer staticSegment.deinit();
 
-    try staticSegment.children.append(std.testing.allocator, 1);
-    try staticSegment.children.append(std.testing.allocator, 2);
+    try staticSegment.addChild(1);
+    try staticSegment.addChild(2);
     staticSegment.terminal = 3;
 
     try std.testing.expectEqual("users", staticSegment.name);
@@ -62,27 +77,41 @@ test "Static segment creation and deinitialization" {
 
 /// Parameter segments match any single path segment and can have child segments and/or be terminal.
 const Parameter = struct {
+    allocator: Allocator,
+
     children: ArrayList(usize) = .empty,
     terminal: ?usize = null,
 
-    pub fn deinit(self: *Parameter, allocator: Allocator) void {
-        self.children.deinit(allocator);
+    pub fn init(allocator: Allocator) Parameter {
+        return Parameter{
+            .allocator = allocator,
+            .children = .empty,
+            .terminal = null,
+        };
+    }
+
+    pub fn addChild(self: *Parameter, childIndex: usize) !void {
+        try self.children.append(self.allocator, childIndex);
+    }
+
+    pub fn deinit(self: *Parameter) void {
+        self.children.deinit(self.allocator);
     }
 };
 
 test "Parameter segment creation and deinitialization" {
-    var parameterSegment = Parameter{
-        .terminal = 4,
-    };
-    defer parameterSegment.deinit(std.testing.allocator);
+    var parameterSegment = Parameter.init(std.testing.allocator);
+    defer parameterSegment.deinit();
 
-    try parameterSegment.children.append(std.testing.allocator, 5);
-    try parameterSegment.children.append(std.testing.allocator, 6);
+    parameterSegment.terminal = 4;
+
+    try parameterSegment.addChild(5);
+    try parameterSegment.addChild(6);
 
     try std.testing.expectEqual(2, parameterSegment.children.items.len);
     try std.testing.expectEqual(5, parameterSegment.children.items[0]);
     try std.testing.expectEqual(6, parameterSegment.children.items[1]);
-    try std.testing.expectEqual(4, parameterSegment.terminal.?);
+    try std.testing.expectEqual(4, parameterSegment.terminal);
 }
 
 /// Wildcard segments match any remaining path segments and must be the last segment in a route.
@@ -113,75 +142,99 @@ const Segment = union(SegmentType) {
 fn Router(comptime T: type) type {
     return struct {
         const Self = @This();
+        allocator: Allocator,
 
         segments: ArrayList(Segment) = .empty,
         terminals: ArrayList(Terminal(T)) = .empty,
 
-        pub fn deinit(self: *Self, allocator: Allocator) void {
+        pub fn init(allocator: Allocator) Self {
+            return Self{
+                .allocator = allocator,
+                .segments = .empty,
+                .terminals = .empty,
+            };
+        }
+
+        pub fn addStatic(self: *Self, name: []const u8) !usize {
+            const segment = Static{
+                .allocator = self.allocator,
+                .name = name,
+            };
+            const index = self.segments.items.len;
+
+            try self.segments.append(self.allocator, Segment{ .static = segment });
+
+            return index;
+        }
+
+        pub fn addParameter(self: *Self) !usize {
+            const segment = Parameter{
+                .allocator = self.allocator,
+            };
+            const index = self.segments.items.len;
+
+            try self.segments.append(self.allocator, Segment{ .parameter = segment });
+
+            return index;
+        }
+
+        pub fn addWildcard(self: *Self) !usize {
+            const segment = Wildcard{};
+            const index = self.segments.items.len;
+
+            try self.segments.append(self.allocator, Segment{ .wildcard = segment });
+
+            return index;
+        }
+
+        pub fn addTerminal(self: *Self, handler: T, parameter_names: ArrayList([]const u8)) !usize {
+            const terminal = Terminal(T){
+                .allocator = self.allocator,
+                .handler = handler,
+                .parameter_names = parameter_names,
+            };
+            const index = self.terminals.items.len;
+
+            try self.terminals.append(self.allocator, terminal);
+
+            return index;
+        }
+
+        pub fn deinit(self: *Self) void {
             for (0..self.segments.items.len) |i| {
                 switch (self.segments.items[i]) {
-                    .static => self.segments.items[i].static.deinit(allocator),
-                    .parameter => self.segments.items[i].parameter.deinit(allocator),
+                    .static => self.segments.items[i].static.deinit(),
+                    .parameter => self.segments.items[i].parameter.deinit(),
                     .wildcard => {},
                 }
             }
-            self.segments.deinit(allocator);
+            self.segments.deinit(self.allocator);
 
             for (0..self.terminals.items.len) |i| {
-                self.terminals.items[i].deinit(allocator);
+                self.terminals.items[i].deinit();
             }
-            self.terminals.deinit(allocator);
+            self.terminals.deinit(self.allocator);
         }
     };
 }
 
 test "Router creation and deinitialization" {
     const RouterType = Router(i32);
-    var router = RouterType{};
-    defer router.deinit(std.testing.allocator);
+    var router = RouterType.init(std.testing.allocator);
+    defer router.deinit();
 
-    var staticSegment = Static{
-        .name = "users",
-    };
-    try staticSegment.children.append(std.testing.allocator, 1);
-    try staticSegment.children.append(std.testing.allocator, 2);
-    staticSegment.terminal = 3;
+    const terminalIndex = try router.addTerminal(42, .empty);
 
-    var parameterSegment = Parameter{
-        .terminal = 4,
-    };
-    try parameterSegment.children.append(std.testing.allocator, 5);
-    try parameterSegment.children.append(std.testing.allocator, 6);
+    const parameterIndex = try router.addParameter();
+    router.segments.items[parameterIndex].parameter.terminal = terminalIndex;
 
-    const wildcardSegment = Wildcard{
-        .terminal = 7,
-    };
-    try router.segments.append(std.testing.allocator, Segment{ .static = staticSegment });
-    try router.segments.append(std.testing.allocator, Segment{ .parameter = parameterSegment });
-    try router.segments.append(std.testing.allocator, Segment{ .wildcard = wildcardSegment });
+    const staticIndex = try router.addStatic("users");
+    try router.segments.items[staticIndex].static.addChild(parameterIndex);
 
-    var terminal1 = Terminal(i32){
-        .handler = 42,
-    };
-    try terminal1.parameter_names.append(std.testing.allocator, "id");
-    try terminal1.parameter_names.append(std.testing.allocator, "name");
-
-    var terminal2 = Terminal(i32){
-        .handler = 43,
-    };
-    try terminal2.parameter_names.append(std.testing.allocator, "age");
-
-    try router.terminals.append(std.testing.allocator, terminal1);
-    try router.terminals.append(std.testing.allocator, terminal2);
-
-    // Verify segments
-    try std.testing.expectEqual(3, router.segments.items.len);
-    try std.testing.expectEqual("users", router.segments.items[0].static.name);
-    try std.testing.expectEqual(2, router.segments.items[0].static.children.items.len);
-    try std.testing.expectEqual(1, router.segments.items[0].static.children.items[0]);
-    try std.testing.expectEqual(2, router.segments.items[0].static.children.items[1]);
-    try std.testing.expectEqual(3, router.segments.items[0].static.terminal.?);
-    try std.testing.expectEqual(2, router.segments.items[1].parameter.children.items.len);
-    try std.testing.expectEqual(4, router.segments.items[1].parameter.terminal.?);
-    try std.testing.expectEqual(7, router.segments.items[2].wildcard.terminal);
+    try std.testing.expectEqual(2, router.segments.items.len);
+    try std.testing.expectEqual(1, router.terminals.items.len);
+    try std.testing.expectEqual("users", router.segments.items[staticIndex].static.name);
+    try std.testing.expectEqual(parameterIndex, router.segments.items[staticIndex].static.children.items[0]);
+    try std.testing.expectEqual(terminalIndex, router.segments.items[parameterIndex].parameter.terminal);
+    try std.testing.expectEqual(42, router.terminals.items[terminalIndex].handler);
 }
