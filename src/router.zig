@@ -238,3 +238,43 @@ test "Router creation and deinitialization" {
     try std.testing.expectEqual(terminalIndex, router.segments.items[parameterIndex].parameter.terminal);
     try std.testing.expectEqual(42, router.terminals.items[terminalIndex].handler);
 }
+
+/// Splits a path into segments based on '/' and handles wildcard segments ('*').
+fn splitPath(allocator: Allocator, path: []const u8) !ArrayList([]const u8) {
+    var segments: ArrayList([]const u8) = .empty;
+    var start: usize = 0;
+    for (0..path.len) |i| {
+        if (path[i] == '/') {
+            if (i > start) {
+                try segments.append(allocator, path[start..i]);
+            }
+            start = i + 1;
+        } else if (path[i] == '*') {
+            break;
+        }
+    }
+    if (start < path.len) {
+        try segments.append(allocator, path[start..]);
+    }
+
+    return segments;
+}
+
+test "splitPath function" {
+    const allocator = std.testing.allocator;
+
+    var segments = try splitPath(allocator, "/users/123/profile");
+    defer segments.deinit(allocator);
+
+    try std.testing.expectEqual(3, segments.items.len);
+    try std.testing.expectEqualStrings("users", segments.items[0]);
+    try std.testing.expectEqualStrings("123", segments.items[1]);
+    try std.testing.expectEqualStrings("profile", segments.items[2]);
+
+    var wildcardSegments = try splitPath(allocator, "/files/*rest/of/the/path");
+    defer wildcardSegments.deinit(allocator);
+
+    try std.testing.expectEqual(2, wildcardSegments.items.len);
+    try std.testing.expectEqualStrings("files", wildcardSegments.items[0]);
+    try std.testing.expectEqualStrings("*rest/of/the/path", wildcardSegments.items[1]);
+}
