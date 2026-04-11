@@ -1,4 +1,7 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
+const StringHashMap = std.StringHashMap;
 
 /// Terminals represent the end of a route and contain the handler and parameter names for that route.
 fn Terminal(comptime T: type) type {
@@ -38,13 +41,160 @@ const Segment = union(SegmentType) {
     wildcard: Wildcard,
 };
 
-pub fn Router(comptime T: type) type {
+const ParameterList = struct {
+    allocator: Allocator,
+    list: ArrayList([]const u8),
+
+    pub fn init(allocator: Allocator) ParameterList {
+        return ParameterList{
+            .allocator = allocator,
+            .list = .empty,
+        };
+    }
+
+    pub fn append(self: *ParameterList, name: []const u8) !void {
+        try self.list.append(self.allocator, name);
+    }
+
+    pub fn get(self: *ParameterList, index: usize) ?[]const u8 {
+        return self.list.items[index];
+    }
+
+    pub fn deinit(self: *ParameterList) void {
+        self.list.deinit(self.allocator);
+    }
+};
+
+fn findSegment(comptime T: type, router: *const Router(T), path: []const u8, parameters: *ParameterList, current_index: usize) !?usize {
+    switch (router.segments[current_index]) {
+        .static => |static| {
+            // Special handling for root segment: it should match paths both with and without leading slash
+            if (current_index == 0) {
+                // This is the root segment (empty name)
+                // Skip leading "/" if present, otherwise treat the entire path as the rest
+                const rest = if (path.len > 0 and path[0] == '/') path[1..] else path;
+                if (rest.len == 0) {
+                    return current_index;
+                } else {
+                    for (static.children) |child_index| {
+                        const result = try findSegment(T, router, rest, parameters, child_index);
+                        if (result) |index| {
+                            return index;
+                        }
+                    }
+                }
+            } else {
+                // Regular static segment matching
+                const next_slash = std.mem.indexOf(u8, path, "/") orelse path.len;
+                const segment_name = path[0..next_slash];
+
+                if (std.mem.eql(u8, static.name, segment_name)) {
+                    const rest = path[@min(next_slash + 1, path.len)..];
+                    if (rest.len == 0) {
+                        return current_index;
+                    } else {
+                        for (static.children) |child_index| {
+                            const result = try findSegment(T, router, rest, parameters, child_index);
+                            if (result) |index| {
+                                return index;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return null;
+        },
+        .parameter => |param| {
+            const next_slash = std.mem.indexOf(u8, path, "/") orelse path.len;
+            const param_value = path[0..next_slash];
+            try parameters.append(param_value);
+
+            const rest = path[@min(next_slash + 1, path.len)..];
+            if (rest.len == 0) {
+                return current_index;
+            } else {
+                for (param.children) |child_index| {
+                    const result = try findSegment(T, router, rest, parameters, child_index);
+                    if (result) |index| {
+                        return index;
+                    }
+                }
+            }
+        },
+        .wildcard => {
+            try parameters.append(path);
+            return current_index;
+        },
+    }
+
+    return null;
+}
+
+fn Router(comptime T: type) type {
     return struct {
         const Self = @This();
 
         segments: []const Segment = &.{},
         terminals: []const Terminal(T) = &.{},
+
+        pub fn match(self: Self, allocator: Allocator, path: []const u8, parameters: *StringHashMap([]const u8)) !?T {
+            var param_list = ParameterList.init(allocator);
+            defer param_list.deinit();
+
+            const segment_index = try findSegment(T, &self, path, &param_list, 0);
+            if (segment_index) |i| {
+                const terminal_index = switch (self.segments[i]) {
+                    .static => self.segments[i].static.terminal,
+                    .parameter => self.segments[i].parameter.terminal,
+                    .wildcard => self.segments[i].wildcard.terminal,
+                };
+
+                if (terminal_index) |j| {
+                    const terminal = self.terminals[j];
+                    for (terminal.parameter_names, 0..) |param_name, k| {
+                        try parameters.put(param_name, param_list.get(k) orelse unreachable);
+                    }
+
+                    return terminal.handler;
+                }
+            }
+
+            return null;
+        }
     };
+}
+
+test "Router.match" {
+    const router = comptime createRouter(i32, &.{ .{ "/", 123 }, .{ "/users/:id/profile/*path", 42 }, .{ "/static/", 99 }, .{ "/:lone", 7 } });
+
+    const allocator = std.testing.allocator;
+    var params = StringHashMap([]const u8).init(allocator);
+    defer params.deinit();
+
+    const result = try router.match(allocator, "users/123/profile/settings/privacy", &params);
+    try std.testing.expectEqual(42, result.?);
+    try std.testing.expectEqualStrings("123", params.get("id") orelse @panic("Expected parameter 'id' not found"));
+    try std.testing.expectEqualStrings("settings/privacy", params.get("path") orelse @panic("Expected parameter 'path' not found"));
+
+    var root_result = try router.match(allocator, "", &params);
+    try std.testing.expectEqual(123, root_result.?);
+    root_result = try router.match(allocator, "/", &params);
+    try std.testing.expectEqual(123, root_result.?);
+
+    var static_result = try router.match(allocator, "static/", &params);
+    try std.testing.expectEqual(99, static_result.?);
+    static_result = try router.match(allocator, "/static", &params);
+    try std.testing.expectEqual(99, static_result.?);
+    static_result = try router.match(allocator, "static", &params);
+    try std.testing.expectEqual(99, static_result.?);
+
+    var lone_result = try router.match(allocator, "anything/", &params);
+    try std.testing.expectEqual(7, lone_result.?);
+    try std.testing.expectEqualStrings("anything", params.get("lone") orelse @panic("Expected parameter 'lone' not found"));
+    lone_result = try router.match(allocator, "something", &params);
+    try std.testing.expectEqual(7, lone_result.?);
+    try std.testing.expectEqualStrings("something", params.get("lone") orelse @panic("Expected parameter 'lone' not found"));
 }
 
 fn addTerminal(comptime T: type, router: *Router(T), handler: T, parameter_names: []const []const u8) usize {
