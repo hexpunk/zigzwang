@@ -3,9 +3,39 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 
-/// Terminals represent the end of a route and contain the handler and parameter names for that route.
+pub const HttpVerb = enum {
+    GET,
+    HEAD,
+    POST,
+    PUT,
+    DELETE,
+    CONNECT,
+    OPTIONS,
+    TRACE,
+    PATCH,
+};
+
+pub fn httpVerbFromString(verb: []const u8) !HttpVerb {
+    return std.meta.stringToEnum(HttpVerb, verb) orelse error.InvalidHttpVerb;
+}
+
+test "httpVerbFromString" {
+    try std.testing.expectEqual(.GET, try httpVerbFromString("GET"));
+    try std.testing.expectEqual(.HEAD, try httpVerbFromString("HEAD"));
+    try std.testing.expectEqual(.POST, try httpVerbFromString("POST"));
+    try std.testing.expectEqual(.PUT, try httpVerbFromString("PUT"));
+    try std.testing.expectEqual(.DELETE, try httpVerbFromString("DELETE"));
+    try std.testing.expectEqual(.CONNECT, try httpVerbFromString("CONNECT"));
+    try std.testing.expectEqual(.OPTIONS, try httpVerbFromString("OPTIONS"));
+    try std.testing.expectEqual(.TRACE, try httpVerbFromString("TRACE"));
+    try std.testing.expectEqual(.PATCH, try httpVerbFromString("PATCH"));
+    try std.testing.expectEqual(error.InvalidHttpVerb, httpVerbFromString("INVALID"));
+}
+
+/// Terminals represent the end of a route and contain the HTTP verb, handler, and parameter names for that route.
 fn Terminal(comptime T: type) type {
     return struct {
+        verb: HttpVerb,
         handler: T,
         parameter_names: []const []const u8 = &.{},
     };
@@ -15,18 +45,18 @@ fn Terminal(comptime T: type) type {
 const Static = struct {
     name: []const u8,
     children: []const usize = &.{},
-    terminal: ?usize = null,
+    terminals: []const usize = &.{},
 };
 
 /// Parameter segments match any single path segment and can have child segments and/or be terminal.
 const Parameter = struct {
     children: []const usize = &.{},
-    terminal: ?usize = null,
+    terminals: []const usize = &.{},
 };
 
 /// Wildcard segments match any remaining path segments and must be the last segment in a route.
 const Wildcard = struct {
-    terminal: ?usize = null,
+    terminals: []const usize = &.{},
 };
 
 const SegmentType = enum {
@@ -138,25 +168,28 @@ fn Router(comptime T: type) type {
         segments: []const Segment = &.{},
         terminals: []const Terminal(T) = &.{},
 
-        pub fn match(self: Self, allocator: Allocator, path: []const u8, parameters: *StringHashMap([]const u8)) !?T {
+        pub fn match(self: Self, allocator: Allocator, verb: HttpVerb, path: []const u8, parameters: *StringHashMap([]const u8)) !?T {
             var param_list = ParameterList.init(allocator);
             defer param_list.deinit();
 
             const segment_index = try findSegment(T, &self, path, &param_list, 0);
             if (segment_index) |i| {
-                const terminal_index = switch (self.segments[i]) {
-                    .static => self.segments[i].static.terminal,
-                    .parameter => self.segments[i].parameter.terminal,
-                    .wildcard => self.segments[i].wildcard.terminal,
+                const terminal_indexes = switch (self.segments[i]) {
+                    .static => self.segments[i].static.terminals,
+                    .parameter => self.segments[i].parameter.terminals,
+                    .wildcard => self.segments[i].wildcard.terminals,
                 };
 
-                if (terminal_index) |j| {
+                for (terminal_indexes) |j| {
                     const terminal = self.terminals[j];
-                    for (terminal.parameter_names, 0..) |param_name, k| {
-                        try parameters.put(param_name, param_list.get(k) orelse unreachable);
-                    }
 
-                    return terminal.handler;
+                    if (terminal.verb == verb) {
+                        for (terminal.parameter_names, 0..) |param_name, k| {
+                            try parameters.put(param_name, param_list.get(k) orelse unreachable);
+                        }
+
+                        return terminal.handler;
+                    }
                 }
             }
 
@@ -166,41 +199,46 @@ fn Router(comptime T: type) type {
 }
 
 test "Router.match" {
-    const router = comptime createRouter(i32, &.{ .{ "/", 123 }, .{ "/users/:id/profile/*path", 42 }, .{ "/static/", 99 }, .{ "/:lone", 7 } });
+    const router = comptime createRouter(i32, &.{
+        .{ .GET, "/", 123 },
+        .{ .GET, "/users/:id/profile/*path", 42 },
+        .{ .GET, "/static/", 99 },
+        .{ .GET, "/:lone", 7 },
+    });
 
     const allocator = std.testing.allocator;
     var params = StringHashMap([]const u8).init(allocator);
     defer params.deinit();
 
-    const result = try router.match(allocator, "users/123/profile/settings/privacy", &params);
+    const result = try router.match(allocator, .GET, "users/123/profile/settings/privacy", &params);
     try std.testing.expectEqual(42, result.?);
     try std.testing.expectEqualStrings("123", params.get("id") orelse @panic("Expected parameter 'id' not found"));
     try std.testing.expectEqualStrings("settings/privacy", params.get("path") orelse @panic("Expected parameter 'path' not found"));
 
-    var root_result = try router.match(allocator, "", &params);
+    var root_result = try router.match(allocator, .GET, "", &params);
     try std.testing.expectEqual(123, root_result.?);
-    root_result = try router.match(allocator, "/", &params);
+    root_result = try router.match(allocator, .GET, "/", &params);
     try std.testing.expectEqual(123, root_result.?);
 
-    var static_result = try router.match(allocator, "static/", &params);
+    var static_result = try router.match(allocator, .GET, "static/", &params);
     try std.testing.expectEqual(99, static_result.?);
-    static_result = try router.match(allocator, "/static", &params);
+    static_result = try router.match(allocator, .GET, "/static", &params);
     try std.testing.expectEqual(99, static_result.?);
-    static_result = try router.match(allocator, "static", &params);
+    static_result = try router.match(allocator, .GET, "static", &params);
     try std.testing.expectEqual(99, static_result.?);
 
-    var lone_result = try router.match(allocator, "anything/", &params);
+    var lone_result = try router.match(allocator, .GET, "anything/", &params);
     try std.testing.expectEqual(7, lone_result.?);
     try std.testing.expectEqualStrings("anything", params.get("lone") orelse @panic("Expected parameter 'lone' not found"));
-    lone_result = try router.match(allocator, "something", &params);
+    lone_result = try router.match(allocator, .GET, "something", &params);
     try std.testing.expectEqual(7, lone_result.?);
     try std.testing.expectEqualStrings("something", params.get("lone") orelse @panic("Expected parameter 'lone' not found"));
 }
 
-fn addTerminal(comptime T: type, router: *Router(T), handler: T, parameter_names: []const []const u8) usize {
+fn addTerminal(comptime T: type, router: *Router(T), verb: HttpVerb, handler: T, parameter_names: []const []const u8) usize {
     comptime {
         const terminal_index = router.terminals.len;
-        const new_terminal: Terminal(T) = .{ .handler = handler, .parameter_names = parameter_names };
+        const new_terminal: Terminal(T) = .{ .verb = verb, .handler = handler, .parameter_names = parameter_names };
         const new_term_arr = [_]Terminal(T){new_terminal};
         router.terminals = router.terminals ++ &new_term_arr;
         return terminal_index;
@@ -216,7 +254,7 @@ test "addTerminal" {
 
         const handler = 42;
         const parameter_names = &.{"id"};
-        const terminal_index = addTerminal(i32, &r, handler, parameter_names);
+        const terminal_index = addTerminal(i32, &r, .GET, handler, parameter_names);
 
         break :blk .{ terminal_index, r };
     };
@@ -409,8 +447,19 @@ fn addChild(comptime T: type, router: *Router(T), segment_index: usize, new_chil
         var new_segment: Segment = undefined;
 
         switch (old_segment) {
-            .static => new_segment = .{ .static = .{ .name = old_segment.static.name, .children = insertSorted(T, router, old_segment.static.children, new_child), .terminal = old_segment.static.terminal } },
-            .parameter => new_segment = .{ .parameter = .{ .children = insertSorted(T, router, old_segment.parameter.children, new_child), .terminal = old_segment.parameter.terminal } },
+            .static => new_segment = .{
+                .static = .{
+                    .name = old_segment.static.name,
+                    .children = insertSorted(T, router, old_segment.static.children, new_child),
+                    .terminals = old_segment.static.terminals,
+                },
+            },
+            .parameter => new_segment = .{
+                .parameter = .{
+                    .children = insertSorted(T, router, old_segment.parameter.children, new_child),
+                    .terminals = old_segment.parameter.terminals,
+                },
+            },
             .wildcard => @panic("Wildcard segments cannot have children"),
         }
 
@@ -418,73 +467,103 @@ fn addChild(comptime T: type, router: *Router(T), segment_index: usize, new_chil
     }
 }
 
-fn setTerminal(comptime T: type, router: *Router(T), segment_index: usize, terminal_index: usize) void {
+fn prependTerminal(comptime T: type, router: *Router(T), segment_index: usize, terminal_index: usize) void {
     comptime {
         const old_segment = router.segments[segment_index];
         var new_segment: Segment = undefined;
 
         switch (old_segment) {
-            .static => new_segment = .{ .static = .{ .name = old_segment.static.name, .children = old_segment.static.children, .terminal = terminal_index } },
-            .parameter => new_segment = .{ .parameter = .{ .children = old_segment.parameter.children, .terminal = terminal_index } },
-            .wildcard => new_segment = .{ .wildcard = .{ .terminal = terminal_index } },
+            .static => new_segment = .{
+                .static = .{
+                    .name = old_segment.static.name,
+                    .children = old_segment.static.children,
+                    .terminals = .{terminal_index} ++ old_segment.static.terminals,
+                },
+            },
+            .parameter => new_segment = .{
+                .parameter = .{
+                    .children = old_segment.parameter.children,
+                    .terminals = .{terminal_index} ++ old_segment.parameter.terminals,
+                },
+            },
+            .wildcard => new_segment = .{
+                .wildcard = .{
+                    .terminals = .{terminal_index} ++ old_segment.wildcard.terminals,
+                },
+            },
         }
 
         replaceSegment(T, router, segment_index, new_segment);
     }
 }
 
-test "setTerminal: static segment" {
-    const index, const router = comptime blk: {
+test "prependTerminal: static segment" {
+    const router, const segment_index, const term_index1, const term_index2 = comptime blk: {
         var r = Router(i32){
             .segments = &.{},
             .terminals = &.{},
         };
 
-        const term_idx = addTerminal(i32, &r, 42, &.{"id"});
+        const term_index1 = addTerminal(i32, &r, .GET, 42, &.{});
+        const term_index2 = addTerminal(i32, &r, .POST, 99, &.{});
         const segment_index = addSegment(i32, &r, "users");
-        setTerminal(i32, &r, segment_index, term_idx);
+        prependTerminal(i32, &r, segment_index, term_index1);
+        prependTerminal(i32, &r, segment_index, term_index2);
 
-        break :blk .{ segment_index, r };
+        break :blk .{ r, segment_index, term_index1, term_index2 };
     };
 
-    try std.testing.expectEqual(0, index);
-    try std.testing.expectEqual(42, router.terminals[router.segments[index].static.terminal orelse unreachable].handler);
+    try std.testing.expectEqual(0, segment_index);
+    try std.testing.expectEqual(0, term_index1);
+    try std.testing.expectEqual(1, term_index2);
+    try std.testing.expectEqual(term_index2, router.segments[segment_index].static.terminals[0]);
+    try std.testing.expectEqual(term_index1, router.segments[segment_index].static.terminals[1]);
 }
 
-test "setTerminal: parameter segment" {
-    const index, const router = comptime blk: {
+test "prependTerminal: parameter segment" {
+    const router, const segment_index, const term_index1, const term_index2 = comptime blk: {
         var r = Router(i32){
             .segments = &.{},
             .terminals = &.{},
         };
 
-        const term_idx = addTerminal(i32, &r, 42, &.{"id"});
+        const term_index1 = addTerminal(i32, &r, .GET, 42, &.{"id"});
+        const term_index2 = addTerminal(i32, &r, .POST, 99, &.{"id"});
         const segment_index = addSegment(i32, &r, ":id");
-        setTerminal(i32, &r, segment_index, term_idx);
+        prependTerminal(i32, &r, segment_index, term_index1);
+        prependTerminal(i32, &r, segment_index, term_index2);
 
-        break :blk .{ segment_index, r };
+        break :blk .{ r, segment_index, term_index1, term_index2 };
     };
 
-    try std.testing.expectEqual(0, index);
-    try std.testing.expectEqual(42, router.terminals[router.segments[index].parameter.terminal orelse unreachable].handler);
+    try std.testing.expectEqual(0, segment_index);
+    try std.testing.expectEqual(0, term_index1);
+    try std.testing.expectEqual(1, term_index2);
+    try std.testing.expectEqual(term_index2, router.segments[segment_index].parameter.terminals[0]);
+    try std.testing.expectEqual(term_index1, router.segments[segment_index].parameter.terminals[1]);
 }
 
-test "setTerminal: wildcard segment" {
-    const index, const router = comptime blk: {
+test "prependTerminal: wildcard segment" {
+    const router, const segment_index, const term_index1, const term_index2 = comptime blk: {
         var r = Router(i32){
             .segments = &.{},
             .terminals = &.{},
         };
 
-        const term_idx = addTerminal(i32, &r, 42, &.{"id"});
+        const term_index1 = addTerminal(i32, &r, .GET, 42, &.{});
+        const term_index2 = addTerminal(i32, &r, .POST, 99, &.{});
         const segment_index = addSegment(i32, &r, "*the/rest/of/the/path");
-        setTerminal(i32, &r, segment_index, term_idx);
+        prependTerminal(i32, &r, segment_index, term_index1);
+        prependTerminal(i32, &r, segment_index, term_index2);
 
-        break :blk .{ segment_index, r };
+        break :blk .{ r, segment_index, term_index1, term_index2 };
     };
 
-    try std.testing.expectEqual(0, index);
-    try std.testing.expectEqual(42, router.terminals[router.segments[index].wildcard.terminal.?].handler);
+    try std.testing.expectEqual(0, segment_index);
+    try std.testing.expectEqual(0, term_index1);
+    try std.testing.expectEqual(1, term_index2);
+    try std.testing.expectEqual(term_index2, router.segments[segment_index].wildcard.terminals[0]);
+    try std.testing.expectEqual(term_index1, router.segments[segment_index].wildcard.terminals[1]);
 }
 
 /// Splits a path into segments based on '/' and handles wildcard segments ('*').
@@ -684,7 +763,7 @@ fn addRoute(comptime T: type, router: *Router(T), segments: []const []const u8, 
     comptime {
         // If segments is empty, set the terminal for the parent segment and return
         if (segments.len == 0) {
-            setTerminal(T, router, parent_index, terminal_index);
+            prependTerminal(T, router, parent_index, terminal_index);
 
             return;
         }
@@ -703,20 +782,28 @@ fn addRoute(comptime T: type, router: *Router(T), segments: []const []const u8, 
     }
 }
 
-pub fn createRouter(comptime T: type, routes: []const struct { []const u8, T }) Router(T) {
+pub fn createRouter(comptime T: type, routes: []const struct { HttpVerb, []const u8, T }) Router(T) {
     comptime {
         var router = Router(T){
-            .segments = &.{.{ .static = .{ .name = "<root>", .children = &.{}, .terminal = null } }}, // Root segment
+            .segments = &.{
+                // Root segment
+                .{
+                    .static = .{
+                        .name = "<root>",
+                    },
+                },
+            },
             .terminals = &.{},
         };
 
         for (routes) |route| {
-            const path = route[0];
-            const value = route[1];
+            const verb = route[0];
+            const path = route[1];
+            const value = route[2];
 
             const segments = splitPath(path);
             const parameter_names = getParameterNames(segments);
-            const terminal_index = addTerminal(T, &router, value, parameter_names);
+            const terminal_index = addTerminal(T, &router, verb, value, parameter_names);
 
             addRoute(T, &router, segments, terminal_index, 0);
         }
@@ -726,7 +813,12 @@ pub fn createRouter(comptime T: type, routes: []const struct { []const u8, T }) 
 }
 
 test "createRouter" {
-    const router = comptime createRouter(i32, &.{ .{ "/a", 1 }, .{ "/b", 2 }, .{ "/:id", 3 }, .{ "/*path", 4 } });
+    const router = comptime createRouter(i32, &.{
+        .{ .GET, "/a", 1 },
+        .{ .GET, "/b", 2 },
+        .{ .GET, "/:id", 3 },
+        .{ .GET, "/*path", 4 },
+    });
 
     try std.testing.expectEqual(5, router.segments.len);
     try std.testing.expectEqualStrings("a", router.segments[1].static.name);
